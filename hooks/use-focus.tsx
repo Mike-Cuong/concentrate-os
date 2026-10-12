@@ -10,14 +10,13 @@ import {
   type ReactNode,
 } from "react";
 import { toast } from "sonner";
+import { buildPlaylist, type Track } from "@/lib/momentum/music";
 import { useWorkspace } from "./use-workspace";
 
-// Đặt là 1 để test nhanh (25 phút thành 25 giây). Test xong NHỚ đặt lại 60.
+// Đang để 1 để test nhanh (25 phút thành 25 giây). Test xong NHỚ đặt lại 60.
 const SECONDS_PER_MINUTE = 60;
 
-// Thời gian nghỉ (phút) theo thời lượng phiên tập trung
 export const BREAK_MINUTES: Record<number, number> = { 25: 5, 50: 15 };
-// Thời lượng nhạc cổ điển (phút) phát trong giờ nghỉ - dùng ở bước gắn nhạc
 export const MUSIC_MINUTES: Record<number, number> = { 25: 3, 50: 10 };
 
 type FocusStatus = "idle" | "running" | "paused" | "completed";
@@ -29,11 +28,18 @@ interface FocusValue {
   phase: FocusPhase;
   breakMinutes: number;
   taskId?: string;
+  musicEnabled: boolean;
+  musicVolume: number;
+  nowPlaying?: string;
+  musicBlocked: boolean;
   setDuration: (minutes: number) => void;
   selectTask: (id: string) => void;
   toggle: () => void;
   reset: () => void;
   skipBreak: () => void;
+  toggleMusic: () => void;
+  setMusicVolume: (volume: number) => void;
+  playMusic: () => void;
 }
 const FocusContext = createContext<FocusValue | null>(null);
 
@@ -51,7 +57,112 @@ export function FocusProvider({ children }: { children: ReactNode }) {
 
   const breakMinutes = BREAK_MINUTES[duration] ?? 5;
 
-  // Hết phiên tập trung: lưu phiên rồi tự chuyển sang nghỉ
+  // ---------- NHẠC ----------
+  const [musicEnabled, setMusicEnabled] = useState(true);
+  const [musicVolume, setMusicVolumeState] = useState(0.6);
+  const [nowPlaying, setNowPlaying] = useState<string>();
+  const [musicBlocked, setMusicBlocked] = useState(false);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const playlist = useRef<Track[]>([]);
+  const trackIndex = useRef(0);
+  const musicEnabledRef = useRef(musicEnabled);
+  musicEnabledRef.current = musicEnabled;
+  const volumeRef = useRef(musicVolume);
+  volumeRef.current = musicVolume;
+
+  const playTrack = useCallback((index: number) => {
+    const audio = audioRef.current;
+    const track = playlist.current[index];
+    if (!audio || !track) {
+      playlist.current = [];
+      setNowPlaying(undefined);
+      return;
+    }
+    trackIndex.current = index;
+    audio.src = track.src;
+    audio.volume = volumeRef.current;
+    setNowPlaying(`${track.title} - ${track.composer}`);
+    audio
+      .play()
+      .then(() => setMusicBlocked(false))
+      .catch((error) => {
+        if (error?.name === "NotAllowedError") setMusicBlocked(true);
+      });
+  }, []);
+
+  const startMusic = useCallback(
+    (focusMinutes: number) => {
+      const targetSeconds = (MUSIC_MINUTES[focusMinutes] ?? 3) * 60;
+      playlist.current = buildPlaylist(targetSeconds);
+      playTrack(0);
+    },
+    [playTrack],
+  );
+
+  const stopMusic = useCallback(() => {
+    playlist.current = [];
+    audioRef.current?.pause();
+    setNowPlaying(undefined);
+    setMusicBlocked(false);
+  }, []);
+
+  useEffect(() => {
+    const audio = new Audio();
+    audioRef.current = audio;
+    const next = () => playTrack(trackIndex.current + 1);
+    audio.addEventListener("ended", next);
+    audio.addEventListener("error", next);
+    return () => {
+      audio.removeEventListener("ended", next);
+      audio.removeEventListener("error", next);
+      audio.pause();
+      audioRef.current = null;
+    };
+  }, [playTrack]);
+
+  useEffect(() => {
+    try {
+      if (localStorage.getItem("focus-music") === "off") setMusicEnabled(false);
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    if (audioRef.current) audioRef.current.volume = musicVolume;
+  }, [musicVolume]);
+
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio || phase !== "break" || playlist.current.length === 0) return;
+    if (status === "paused") audio.pause();
+    if (status === "running" && audio.paused && audio.src)
+      audio.play().catch(() => {});
+  }, [phase, status]);
+
+  const toggleMusic = () => {
+    const next = !musicEnabled;
+    setMusicEnabled(next);
+    try {
+      localStorage.setItem("focus-music", next ? "on" : "off");
+    } catch {}
+    if (!next) stopMusic();
+    else if (phase === "break" && status === "running") startMusic(duration);
+  };
+  const setMusicVolume = (volume: number) =>
+    setMusicVolumeState(Math.min(1, Math.max(0, volume)));
+  const playMusic = () => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    if (playlist.current.length === 0) {
+      if (phase === "break" && musicEnabled) startMusic(duration);
+      return;
+    }
+    audio
+      .play()
+      .then(() => setMusicBlocked(false))
+      .catch(() => {});
+  };
+  // ---------- HẾT PHẦN NHẠC ----------
+
   const complete = useCallback(() => {
     if (!session.current) return;
     const finished = session.current;
@@ -66,20 +177,22 @@ export function FocusProvider({ children }: { children: ReactNode }) {
     setPhase("break");
     setRemaining(breakSeconds);
     setStatus("running");
+    if (musicEnabledRef.current) startMusic(duration);
     toast.success("Một phiên tập trung trọn vẹn!", {
       description: `${duration} phút đã được thêm vào hành trình. Nghỉ ${breakMinutes} phút nhé.`,
     });
-  }, [duration, taskId, breakMinutes]);
+  }, [duration, taskId, breakMinutes, startMusic]);
 
-  // Hết giờ nghỉ: quay về trạng thái chờ phiên mới
   const finishBreak = useCallback(() => {
+    stopMusic();
     setPhase("focus");
     setRemaining(duration * SECONDS_PER_MINUTE);
     setStatus("idle");
     toast.info("Hết giờ nghỉ. Sẵn sàng cho phiên tiếp theo nhé!");
-  }, [duration]);
+  }, [duration, stopMusic]);
 
   const skipBreak = () => {
+    stopMusic();
     setPhase("focus");
     setRemaining(duration * SECONDS_PER_MINUTE);
     setStatus("idle");
@@ -141,6 +254,13 @@ export function FocusProvider({ children }: { children: ReactNode }) {
         taskId,
         toggle,
         skipBreak,
+        musicEnabled,
+        musicVolume,
+        nowPlaying,
+        musicBlocked,
+        toggleMusic,
+        setMusicVolume,
+        playMusic,
         setDuration: (minutes) => {
           if (
             status === "running" ||
@@ -162,6 +282,7 @@ export function FocusProvider({ children }: { children: ReactNode }) {
           setTaskId(id || undefined);
         },
         reset: () => {
+          stopMusic();
           session.current = null;
           setPhase("focus");
           setRemaining(duration * SECONDS_PER_MINUTE);
