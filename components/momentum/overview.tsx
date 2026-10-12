@@ -137,6 +137,36 @@ export function QuickFocus() {
             Bỏ qua nghỉ
           </Button>
         )}
+        {onBreak && (
+          <div className="mt-3 flex flex-col gap-2 text-sm">
+            <p className="flex items-center gap-2 text-muted-foreground">
+              <AudioLines className="size-4" />
+              {focus.musicEnabled
+                ? (focus.nowPlaying ?? "Nhạc cổ điển sẽ phát trong giờ nghỉ")
+                : "Nhạc đang tắt"}
+            </p>
+            <div className="flex gap-2">
+              <Button size="sm" variant="outline" onClick={focus.toggleMusic}>
+                {focus.musicEnabled ? "Tắt nhạc" : "Bật nhạc"}
+              </Button>
+              {focus.musicBlocked && (
+                <Button size="sm" onClick={focus.playMusic}>
+                  Bấm để phát nhạc
+                </Button>
+              )}
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.05}
+              value={focus.musicVolume}
+              onChange={(e) => focus.setMusicVolume(Number(e.target.value))}
+              aria-label="Âm lượng nhạc"
+              className="w-full"
+            />
+          </div>
+        )}
       </CardContent>
     </Card>
   );
